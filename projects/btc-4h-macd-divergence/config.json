@@ -1,0 +1,47 @@
+{
+  "strategy_name": "btc_macd_bullish_divergence",
+  "strategy_version": "v1",
+  "notes": "BTC 4H MACD 底背離策略。進場條件：MACD底背離確認 + 底部反彈2% + RSI 30-40。止盈：RSI≥70。止損：底背離低點。時間止損：30根4H棒。",
+  "data": {
+    "symbol": "BTCUSDT",
+    "interval": "4h",
+    "start_date": "2019-01-01",
+    "end_date": "2025-02-25"
+  },
+  "entry": {
+    "rebound_pct": 2.0,
+    "rsi_min": 30,
+    "rsi_max": 40,
+    "require_macd_divergence": true,
+    "divergence_type": "bullish"
+  },
+  "exit": {
+    "tp_rsi": 70,
+    "sl_type": "divergence_low",
+    "sl_buffer_pct": 0.1,
+    "time_stop_bars": 30
+  },
+  "indicators": {
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "rsi_period": 14,
+    "atr_period": 14,
+    "swing_window": 5,
+    "divergence_lookback_bars": 60
+  },
+  "costs": {
+    "fee_pct": 0.06,
+    "slippage_pct": 0.05
+  },
+  "filters": {
+    "min_volume_percentile": null,
+    "trend_filter_enabled": false,
+    "trend_ma_period": 200,
+    "trend_direction": "any"
+  },
+  "output": {
+    "save_csv": true,
+    "results_dir": "projects/btc-4h-macd-divergence/results/"
+  }
+}

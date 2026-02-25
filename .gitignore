@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.env
+.venv/
+venv/
+*.egg-info/
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+.~*
+
+# Optional: 若不想把大檔或本地結果追蹤進版控，可取消註解
+# results/*.csv
+# results/*.xlsx
+# projects/*/results/*.csv
+# projects/*/results/*.xlsx
