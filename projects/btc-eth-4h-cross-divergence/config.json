@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "strategy": "cross_asset_divergence",
+  "description": "BTC-ETH 4H 跨資產背離檢測與回測",
+
+  "data": {
+    "symbol": "BTCUSDT / ETHUSDT",
+    "exchange": "Bybit v5 REST API",
+    "interval": "4h",
+    "start_date": "2021-01-01",
+    "end_date": "today",
+    "note": "OHLCV 數據來自公開 API，無 API key 需求"
+  },
+
+  "detection": {
+    "swing_lookback": 3,
+    "swing_lookback_note": "左右各 3 根棒確認 swing high/low",
+
+    "max_divergence_days": 5,
+    "max_divergence_days_note": "BTC 兩個 swing point 最多 5 天，否則不成立背離",
+
+    "eth_lookback_days": 5,
+    "eth_lookback_days_note": "搜索 ETH 基準點的時間窗口",
+
+    "eth_match_tolerance_candles": 3,
+    "eth_match_tolerance_candles_note": "ETH 第二點匹配容差 ±3 根 4H K 線",
+
+    "rejection_window": 15,
+    "rejection_window_note": "頸線突破後，監控 15 根 4H 內的反彈拒絕",
+
+    "success_threshold": 0.02,
+    "success_threshold_note": "背離確認後的後續動作需達 2% 才算成功"
+  },
+
+  "backtest": {
+    "sl_buffer_pct": 0.1,
+    "sl_buffer_pct_note": "止損 = failure_price × (1 ± 0.1%)",
+
+    "rr_ratio": 2.0,
+    "rr_ratio_note": "盈虧比（固定 RR 或 measured move 模式）",
+
+    "time_stop_bars": 20,
+    "time_stop_bars_note": "進場後 20 根 4H 強制平倉",
+
+    "use_measured_move": true,
+    "use_measured_move_note": "使用 measured move 計算止盈，而非固定 RR"
+  },
+
+  "costs": {
+    "fee_pct": 0.055,
+    "fee_pct_note": "Maker 手續費 0.055% (Bybit 標準)",
+
+    "slippage_pct": 0.05,
+    "slippage_pct_note": "假設滑點 0.05%（保守估計）",
+
+    "total_round_trip": "0.22%",
+    "total_round_trip_note": "(0.055% + 0.05%) × 2 來回"
+  },
+
+  "cli_examples": {
+    "default": "python scripts/detect_divergence.py",
+    "custom_swing": "python scripts/detect_divergence.py --swing-lookback 4 --max-days 7",
+    "divergenceplus": "python scripts/divergenceplus.py --rr-ratio 2.5 --time-stop-bars 24 --use-measured-move"
+  }
+}

@@ -1,0 +1,309 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © btc-eth-4h-cross-divergence Strategy v3 (Pine v6)
+// 圖表標的：BINANCE:ETHUSDT（交易標的）
+// 請求標的：BINANCE:BTCUSDT（用 request.security 拉，做跨資產背離判斷）
+// Bearish：BTC HH + ETH LH → 做空 ETH
+// Bullish：BTC LL + ETH HL → 做多 ETH
+
+// @version=6
+strategy("BTC-ETH 4H 跨資產背離 (策略)", overlay=true, max_bars_back=5000,
+         pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+         process_orders_on_close=true)
+
+// ═══════════════════════════════════════════════════════════════════
+// 1. 參數
+// ═══════════════════════════════════════════════════════════════════
+int   LB         = input.int(3,    "Swing 確認棒數（左右各）", minval=1, maxval=10,  group="偵測")
+int   MAX_GAP    = input.int(30,   "兩 Swing 最大間隔（棒）",  minval=5, maxval=100, group="偵測")
+int   ETH_TOL    = input.int(3,    "ETH Swing 匹配容差（棒）", minval=1, maxval=10,  group="偵測")
+int   REJ_WIN    = input.int(15,   "Rejection 監控棒數",       minval=5, maxval=30,  group="偵測")
+float SL_BUF_PCT = input.float(0.1,"止損緩衝 %",               minval=0, maxval=1,   group="出場")
+int   TIME_STOP  = input.int(20,   "時間止損（棒）",           minval=5, maxval=60,  group="出場")
+float RR_RATIO   = input.float(2.0,"固定盈虧比（未用 MM 時）", minval=0.5,maxval=5,  group="出場")
+bool  USE_MM     = input.bool(true,"止盈用 Measured Move",                           group="出場")
+string BTC_SYM   = input.symbol("BINANCE:BTCUSDT", "BTC 標的", group="資料")
+
+// ═══════════════════════════════════════════════════════════════════
+// 2. 取得 BTC OHLC（與圖表同週期）
+// ═══════════════════════════════════════════════════════════════════
+[_bo, btc_h, btc_l, btc_c] = request.security(BTC_SYM, timeframe.period,
+    [open, high, low, close], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+// ETH = 圖表標的
+float eth_h = high
+float eth_l = low
+float eth_c = close
+
+// ═══════════════════════════════════════════════════════════════════
+// 3. Swing 偵測（ta.pivothigh/low 在 R 棒前確認）
+//    → 儲存實際 bar_index（bar_index - LB）與對應價格
+// ═══════════════════════════════════════════════════════════════════
+float btc_ph_val = ta.pivothigh(btc_h, LB, LB)
+float btc_pl_val = ta.pivotlow (btc_l, LB, LB)
+float eth_ph_val = ta.pivothigh(eth_h, LB, LB)
+float eth_pl_val = ta.pivotlow (eth_l, LB, LB)
+
+// BTC Swing Highs（最近兩個）
+var int   bh1_bar = na  // BTC H1 bar_index
+var float bh1_px  = na
+var int   bh2_bar = na  // BTC H2 bar_index
+var float bh2_px  = na
+// BTC Swing Lows
+var int   bl1_bar = na
+var float bl1_px  = na
+var int   bl2_bar = na
+var float bl2_px  = na
+// ETH Swing Highs
+var int   eh1_bar = na
+var float eh1_px  = na
+var int   eh2_bar = na
+var float eh2_px  = na
+// ETH Swing Lows
+var int   el1_bar = na
+var float el1_px  = na
+var int   el2_bar = na
+var float el2_px  = na
+
+if not na(btc_ph_val)
+    bh1_bar := bh2_bar
+    bh1_px  := bh2_px
+    bh2_bar := bar_index - LB
+    bh2_px  := btc_ph_val
+
+if not na(btc_pl_val)
+    bl1_bar := bl2_bar
+    bl1_px  := bl2_px
+    bl2_bar := bar_index - LB
+    bl2_px  := btc_pl_val
+
+if not na(eth_ph_val)
+    eh1_bar := eh2_bar
+    eh1_px  := eh2_px
+    eh2_bar := bar_index - LB
+    eh2_px  := eth_ph_val
+
+if not na(eth_pl_val)
+    el1_bar := el2_bar
+    el1_px  := el2_px
+    el2_bar := bar_index - LB
+    el2_px  := eth_pl_val
+
+// ═══════════════════════════════════════════════════════════════════
+// 4. Bearish 結構判斷
+//    BTC: H2 > H1 (HH)，ETH: H2 < H1 (LH)，兩者時間差 ≤ MAX_GAP
+// ═══════════════════════════════════════════════════════════════════
+bool btc_hh    = not na(bh1_bar) and not na(bh2_bar) and bh2_px > bh1_px and (bh2_bar - bh1_bar) <= MAX_GAP
+bool eth_lh    = not na(eh1_bar) and not na(eh2_bar) and eh2_px < eh1_px and math.abs(eh2_bar - bh2_bar) <= ETH_TOL
+bool bear_ok   = btc_hh and eth_lh
+
+// ETH 頸線（ETH H1 到目前的最低點）
+int  neck_len_bear = math.max(2, bar_index - nz(eh1_bar, bar_index - 2) + 1)
+float neck_eth_bear = ta.lowest(eth_l, neck_len_bear)
+
+// ETH failure price（ETH H2 之後、頸線突破前的最高價，近似為 ETH H2 到目前最高）
+int  fail_len_bear = math.max(2, bar_index - nz(eh2_bar, bar_index - 2))
+float fail_eth_bear = ta.highest(eth_h[1], fail_len_bear)
+
+// 頸線向下突破（ETH 收盤 < 頸線）
+bool neck_brk_bear = bear_ok and eth_c < neck_eth_bear
+
+// 狀態機：突破後計數，監控 REJ_WIN 根
+var int   bsb_cnt  = 99
+var float bsb_fail = na
+var float bsb_neck = na
+var float bsb_eh2  = na
+if neck_brk_bear
+    bsb_cnt  := 0
+    bsb_fail := fail_eth_bear
+    bsb_neck := neck_eth_bear
+    bsb_eh2  := nz(eh2_px)
+else
+    bsb_cnt  := math.min(99, bsb_cnt + 1)
+
+float rej_max_bear = ta.highest(eth_h[1], REJ_WIN)
+bool entry_short   = bsb_cnt == REJ_WIN + 1 and rej_max_bear < nz(bsb_fail, 1e10)
+
+// ═══════════════════════════════════════════════════════════════════
+// 5. Bullish 結構判斷
+//    BTC: L2 < L1 (LL)，ETH: L2 > L1 (HL)，兩者時間差 ≤ MAX_GAP
+// ═══════════════════════════════════════════════════════════════════
+bool btc_ll    = not na(bl1_bar) and not na(bl2_bar) and bl2_px < bl1_px and (bl2_bar - bl1_bar) <= MAX_GAP
+bool eth_hl    = not na(el1_bar) and not na(el2_bar) and el2_px > el1_px and math.abs(el2_bar - bl2_bar) <= ETH_TOL
+bool bull_ok   = btc_ll and eth_hl
+
+int  neck_len_bull = math.max(2, bar_index - nz(el1_bar, bar_index - 2) + 1)
+float neck_eth_bull = ta.highest(eth_h, neck_len_bull)
+
+int  fail_len_bull = math.max(2, bar_index - nz(el2_bar, bar_index - 2))
+float fail_eth_bull = ta.lowest(eth_l[1], fail_len_bull)
+
+bool neck_brk_bull = bull_ok and eth_c > neck_eth_bull
+
+var int   bsb_cnt_b  = 99
+var float bsb_fail_b = na
+var float bsb_neck_b = na
+var float bsb_el2    = na
+if neck_brk_bull
+    bsb_cnt_b  := 0
+    bsb_fail_b := fail_eth_bull
+    bsb_neck_b := neck_eth_bull
+    bsb_el2    := nz(el2_px)
+else
+    bsb_cnt_b  := math.min(99, bsb_cnt_b + 1)
+
+float rej_min_bull = ta.lowest(eth_l[1], REJ_WIN)
+bool entry_long    = bsb_cnt_b == REJ_WIN + 1 and rej_min_bull > nz(bsb_fail_b, 0)
+
+// ═══════════════════════════════════════════════════════════════════
+// 6. 進出場
+// ═══════════════════════════════════════════════════════════════════
+float sl_buf = SL_BUF_PCT / 100.0
+
+var float sl_s = na
+var float tp_s = na
+var float sl_l = na
+var float tp_l = na
+var int   ebar_s = na
+var int   ebar_l = na
+
+if entry_short and strategy.position_size == 0
+    float ep = close
+    sl_s     := bsb_fail * (1.0 + sl_buf)
+    float mm  = math.abs(bsb_eh2 - bsb_neck)
+    tp_s     := USE_MM ? ep - mm : ep - math.abs(ep - sl_s) * RR_RATIO
+    ebar_s   := bar_index
+    strategy.entry("Short", strategy.short)
+
+if entry_long and strategy.position_size == 0
+    float ep = close
+    sl_l     := bsb_fail_b * (1.0 - sl_buf)
+    float mm  = math.abs(bsb_el2 - bsb_neck_b)
+    tp_l     := USE_MM ? ep + mm : ep + math.abs(sl_l - ep) * RR_RATIO
+    ebar_l   := bar_index
+    strategy.entry("Long", strategy.long)
+
+bool ts_s = strategy.position_size < 0 and not na(ebar_s) and (bar_index - ebar_s) >= TIME_STOP
+bool ts_l = strategy.position_size > 0 and not na(ebar_l) and (bar_index - ebar_l) >= TIME_STOP
+
+if strategy.position_size < 0
+    if ts_s
+        strategy.close("Short", comment="TimeStop")
+    else
+        strategy.exit("X-Short", "Short", stop=sl_s, limit=tp_s)
+
+if strategy.position_size > 0
+    if ts_l
+        strategy.close("Long", comment="TimeStop")
+    else
+        strategy.exit("X-Long", "Long", stop=sl_l, limit=tp_l)
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. 繪圖
+// ═══════════════════════════════════════════════════════════════════
+// 必須有一條始終有值的 plot，Strategy Tester 才會有資料
+plot(close, "Ref", color=color.new(color.gray, 90), linewidth=1)
+
+// 進場訊號
+plotshape(entry_short, "空訊", shape.triangledown, location.abovebar, color.red,   size=size.small)
+plotshape(entry_long,  "多訊", shape.triangleup,   location.belowbar, color.green, size=size.small)
+
+// 頸線（背離結構存在時顯示）
+plot(bear_ok ? neck_eth_bear : na, "Bear頸線", color.orange, 1)
+plot(bull_ok ? neck_eth_bull : na, "Bull頸線", color.blue,   1)
+
+// 持倉中的止損／止盈線
+plot(strategy.position_size < 0 ? sl_s : na, "SL-S", color.red,  2)
+plot(strategy.position_size < 0 ? tp_s : na, "TP-S", color.teal, 1)
+plot(strategy.position_size > 0 ? sl_l : na, "SL-L", color.red,  2)
+plot(strategy.position_size > 0 ? tp_l : na, "TP-L", color.teal, 1)
+
+alertcondition(entry_short, "背離空訊", "BTC-ETH Bearish Divergence Short")
+alertcondition(entry_long,  "背離多訊", "BTC-ETH Bullish Divergence Long")
+
+// ═══════════════════════════════════════════════════════════════════
+// 8. 偵錯 Table（直接顯示在圖表上，不需要 Pine Logs 面板）
+//    加到圖表後右下角即可看到，截圖貼給我即可
+// ═══════════════════════════════════════════════════════════════════
+bool SHOW_DEBUG = input.bool(true, "顯示 Debug Table（右下角）", group="偵錯")
+
+// helper
+f_yn(b) => b ? "✅" : "❌"
+f_i(i)  => na(i) ? "na" : str.tostring(i)
+f_f(f)  => na(f) ? "na" : str.tostring(f, "#.##")
+
+if SHOW_DEBUG
+    var table t = table.new(position.bottom_right, 2, 20,
+        bgcolor=color.new(color.black, 30), border_color=color.gray, border_width=1, frame_color=color.gray, frame_width=1)
+
+    if barstate.islast
+        int row = 0
+
+        // header
+        table.cell(t, 0, row, "變數",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy,20))
+        table.cell(t, 1, row, "值",               text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy,20))
+        row += 1
+
+        table.cell(t, 0, row, "TF / BTC_SYM",    text_color=color.white, text_size=size.small)
+        table.cell(t, 1, row, timeframe.period + " / " + BTC_SYM, text_color=color.white, text_size=size.small)
+        row += 1
+
+        table.cell(t, 0, row, "btc_c / eth_c",   text_color=color.white, text_size=size.small)
+        table.cell(t, 1, row, f_f(btc_c) + " / " + f_f(eth_c), text_color=color.white, text_size=size.small)
+        row += 1
+
+        // BTC Highs
+        table.cell(t, 0, row, "BH1 bar/px",      text_color=color.orange, text_size=size.small)
+        table.cell(t, 1, row, f_i(bh1_bar) + " / " + f_f(bh1_px), text_color=color.orange, text_size=size.small)
+        row += 1
+        table.cell(t, 0, row, "BH2 bar/px",      text_color=color.orange, text_size=size.small)
+        table.cell(t, 1, row, f_i(bh2_bar) + " / " + f_f(bh2_px), text_color=color.orange, text_size=size.small)
+        row += 1
+        table.cell(t, 0, row, "btc_hh",          text_color=color.white, text_size=size.small)
+        table.cell(t, 1, row, f_yn(not na(bh1_bar) and not na(bh2_bar) and bh2_px > bh1_px and (bh2_bar - bh1_bar) <= MAX_GAP) +
+            "  gap=" + f_i(nz(bh2_bar)-nz(bh1_bar)), text_color=color.white, text_size=size.small)
+        row += 1
+
+        // ETH Highs
+        table.cell(t, 0, row, "EH1 bar/px",      text_color=color.aqua, text_size=size.small)
+        table.cell(t, 1, row, f_i(eh1_bar) + " / " + f_f(eh1_px), text_color=color.aqua, text_size=size.small)
+        row += 1
+        table.cell(t, 0, row, "EH2 bar/px",      text_color=color.aqua, text_size=size.small)
+        table.cell(t, 1, row, f_i(eh2_bar) + " / " + f_f(eh2_px), text_color=color.aqua, text_size=size.small)
+        row += 1
+        table.cell(t, 0, row, "eth_lh",          text_color=color.white, text_size=size.small)
+        table.cell(t, 1, row, f_yn(not na(eh1_bar) and not na(eh2_bar) and eh2_px < eh1_px and math.abs(nz(eh2_bar)-nz(bh2_bar)) <= ETH_TOL) +
+            "  dist=" + f_i(math.abs(nz(eh2_bar)-nz(bh2_bar))), text_color=color.white, text_size=size.small)
+        row += 1
+
+        // Bearish combined
+        table.cell(t, 0, row, "bear_ok",         text_color=color.red, text_size=size.small)
+        table.cell(t, 1, row, f_yn(bear_ok) + "  bsb_cnt=" + str.tostring(bsb_cnt) + "  fail=" + f_f(bsb_fail), text_color=color.red, text_size=size.small)
+        row += 1
+
+        // BTC Lows
+        table.cell(t, 0, row, "BL1 bar/px",      text_color=color.orange, text_size=size.small)
+        table.cell(t, 1, row, f_i(bl1_bar) + " / " + f_f(bl1_px), text_color=color.orange, text_size=size.small)
+        row += 1
+        table.cell(t, 0, row, "BL2 bar/px",      text_color=color.orange, text_size=size.small)
+        table.cell(t, 1, row, f_i(bl2_bar) + " / " + f_f(bl2_px), text_color=color.orange, text_size=size.small)
+        row += 1
+
+        // ETH Lows
+        table.cell(t, 0, row, "EL1 bar/px",      text_color=color.aqua, text_size=size.small)
+        table.cell(t, 1, row, f_i(el1_bar) + " / " + f_f(el1_px), text_color=color.aqua, text_size=size.small)
+        row += 1
+        table.cell(t, 0, row, "EL2 bar/px",      text_color=color.aqua, text_size=size.small)
+        table.cell(t, 1, row, f_i(el2_bar) + " / " + f_f(el2_px), text_color=color.aqua, text_size=size.small)
+        row += 1
+
+        // Bullish combined
+        table.cell(t, 0, row, "bull_ok",         text_color=color.green, text_size=size.small)
+        table.cell(t, 1, row, f_yn(bull_ok) + "  bsb_cnt=" + str.tostring(bsb_cnt_b) + "  fail=" + f_f(bsb_fail_b), text_color=color.green, text_size=size.small)
+        row += 1
+
+        // entry signals
+        table.cell(t, 0, row, "entry_short",     text_color=color.red, text_size=size.small)
+        table.cell(t, 1, row, f_yn(entry_short), text_color=color.red, text_size=size.small)
+        row += 1
+        table.cell(t, 0, row, "entry_long",      text_color=color.green, text_size=size.small)
+        table.cell(t, 1, row, f_yn(entry_long),  text_color=color.green, text_size=size.small)

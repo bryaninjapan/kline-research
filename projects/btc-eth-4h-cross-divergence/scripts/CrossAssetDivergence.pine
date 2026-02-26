@@ -1,0 +1,191 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © btc-eth-4h-cross-divergence (Pine v6)
+// 對應專案：kline-research/projects/btc-eth-4h-cross-divergence
+// 規則：references/divergence-rules.md, references/exit-risk-rules.md
+// 建議：圖表用 ETH 4H，腳本會用 request.security 拉 BTC 4H 做跨資產背離判斷，交易下在圖表標的（ETH）。
+
+// @version=6
+indicator("BTC-ETH 4H 跨資產背離", overlay=true, max_bars_back=5000, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════
+// 1. 參數（與 config.json / divergence-rules 對齊）
+// ═══════════════════════════════════════════════════════════════════
+int   SWING_LOOKBACK     = input.int(3, "Swing 確認棒數 (左右)", minval=1, maxval=10, group="偵測")
+int   MAX_DIVERGENCE_BAR = input.int(30, "H1-H2 最大間隔 (4H 根數, 約5日=30)", minval=5, maxval=60, group="偵測")
+int   REJECTION_WINDOW   = input.int(15, "頸線突破後監控根數", minval=5, maxval=30, group="偵測")
+float SL_BUFFER_PCT     = input.float(0.1, "止損緩衝 %", minval=0.0, maxval=1.0, group="出場")
+int   TIME_STOP_BARS    = input.int(20, "時間止損 (4H 根數)", minval=5, maxval=60, group="出場")
+float RR_RATIO          = input.float(2.0, "固定盈虧比 (未用 Measured Move 時)", minval=0.5, maxval=5.0, group="出場")
+bool  USE_MEASURED_MOVE  = input.bool(true, "止盈用 Measured Move", group="出場")
+
+string OTHER_SYMBOL      = input.symbol("BINANCE:BTCUSDT", "另一標的 (圖表=ETH 則填 BTC)", group="資料")
+string TF                = input.timeframe("240", "週期 (建議 240=4H)", options=["60","240","D"], group="資料")
+
+// ═══════════════════════════════════════════════════════════════════
+// 2. 取得另一標的 OHLC（圖表=ETH 則拉 BTC）
+// ═══════════════════════════════════════════════════════════════════
+[btc_o, btc_h, btc_l, btc_c] = request.security(OTHER_SYMBOL, TF, [open, high, low, close], lookahead=barmerge.lookahead_off)
+
+// 圖表標的 = 交易標的 (ETH)
+float eth_o = open
+float eth_h = high
+float eth_l = low
+float eth_c = close
+
+// ═══════════════════════════════════════════════════════════════════
+// 3. Swing 點（Pivot = 左右各 SWING_LOOKBACK 根確認）
+// ═══════════════════════════════════════════════════════════════════
+int L = SWING_LOOKBACK
+int R = SWING_LOOKBACK
+
+float btc_ph = ta.pivothigh(btc_h, L, R)
+float btc_pl = ta.pivotlow(btc_l, L, R)
+float eth_ph = ta.pivothigh(eth_h, L, R)
+float eth_pl = ta.pivotlow(eth_l, L, R)
+
+// 確認時當根是 bar_index，pivot 發生在 R 根前
+int pivot_bar_ago = R
+
+// ═══════════════════════════════════════════════════════════════════
+// 4. 記錄最近兩個 Swing High/Low（用於 H1/H2 或 L1/L2）
+// ═══════════════════════════════════════════════════════════════════
+var float btc_h1_price = na
+var float btc_h2_price = na
+var int   btc_h1_ago   = na
+var int   btc_h2_ago   = na
+var float eth_h1_price = na
+var float eth_h2_price = na
+var int   eth_h1_ago   = na
+var int   eth_h2_ago   = na
+
+var float btc_l1_price = na
+var float btc_l2_price = na
+var int   btc_l1_ago   = na
+var int   btc_l2_ago   = na
+var float eth_l1_price = na
+var float eth_l2_price = na
+var int   eth_l1_ago   = na
+var int   eth_l2_ago   = na
+
+if not na(btc_ph)
+    btc_h1_price := btc_h2_price
+    btc_h1_ago   := btc_h2_ago
+    btc_h2_price := btc_ph
+    btc_h2_ago   := pivot_bar_ago
+if not na(eth_ph)
+    eth_h1_price := eth_h2_price
+    eth_h1_ago   := eth_h2_ago
+    eth_h2_price := eth_ph
+    eth_h2_ago   := pivot_bar_ago
+
+if not na(btc_pl)
+    btc_l1_price := btc_l2_price
+    btc_l1_ago   := btc_l2_ago
+    btc_l2_price := btc_pl
+    btc_l2_ago   := pivot_bar_ago
+if not na(eth_pl)
+    eth_l1_price := eth_l2_price
+    eth_l1_ago   := eth_l2_ago
+    eth_l2_price := eth_pl
+    eth_l2_ago   := pivot_bar_ago
+
+// ═══════════════════════════════════════════════════════════════════
+// 5. Bearish：BTC HH + ETH LH；頸線 = H1~H2 間最低低點
+// ═══════════════════════════════════════════════════════════════════
+bool btc_hh_ok   = not na(btc_h1_price) and not na(btc_h2_price) and btc_h2_price > btc_h1_price and (btc_h1_ago - pivot_bar_ago) <= MAX_DIVERGENCE_BAR
+bool eth_lh_ok   = not na(eth_h1_price) and not na(eth_h2_price) and eth_h2_price < eth_h1_price
+bool bearish_ok  = btc_hh_ok and eth_lh_ok
+
+// 頸線：H1 到 H2 之間的最低點（用區間長度做 ta.lowest）
+int bearish_len_btc = math.max(2, btc_h1_ago - pivot_bar_ago + 1)
+int bearish_len_eth = math.max(2, eth_h1_ago - pivot_bar_ago + 1)
+float neck_btc_bear = ta.lowest(btc_l, bearish_len_btc)
+float neck_eth_bear = ta.lowest(eth_l, bearish_len_eth)
+
+// 頸線跌破：收盤 < 頸線（以當前 bar 為「突破 bar」的近似：用最近區間最低當頸線，當前收盤跌破）
+bool neck_break_btc_bear = btc_c < neck_btc_bear
+bool neck_break_eth_bear = eth_c < neck_eth_bear
+bool neck_break_bear     = neck_break_btc_bear and neck_break_eth_bear
+
+// Failure 價近似：H2 與突破區間內的最高價的較低者（反彈不過則背離成立）
+int seg_len_bear = math.max(2, math.min(btc_h1_ago - pivot_bar_ago - 1, 60))
+float fail_eth_bear = math.min(eth_h2_price, ta.highest(eth_h[1], seg_len_bear))
+
+// 狀態機：突破時儲存 failure，監控 REJECTION_WINDOW 根後檢查，下一根進場
+var int   bars_since_break_bear = 99
+var float stored_fail_bear      = na
+var float stored_neck_bear      = na
+var float stored_h2_bear        = na
+if bearish_ok and neck_break_bear
+    bars_since_break_bear := 0
+    stored_fail_bear      := fail_eth_bear
+    stored_neck_bear      := neck_eth_bear
+    stored_h2_bear       := eth_h2_price
+else
+    bars_since_break_bear := math.min(99, bars_since_break_bear + 1)
+
+bool rejection_confirmed_bear = (bars_since_break_bear == REJECTION_WINDOW) and ta.highest(eth_h[1], REJECTION_WINDOW) < stored_fail_bear
+bool entry_short_signal       = (bars_since_break_bear == REJECTION_WINDOW + 1) and (ta.highest(eth_h[1], REJECTION_WINDOW) < stored_fail_bear)
+
+// ═══════════════════════════════════════════════════════════════════
+// 6. Bullish：BTC LL + ETH HL；頸線 = L1~L2 間最高高點
+// ═══════════════════════════════════════════════════════════════════
+bool btc_ll_ok   = not na(btc_l1_price) and not na(btc_l2_price) and btc_l2_price < btc_l1_price and (btc_l1_ago - pivot_bar_ago) <= MAX_DIVERGENCE_BAR
+bool eth_hl_ok   = not na(eth_l1_price) and not na(eth_l2_price) and eth_l2_price > eth_l1_price
+bool bullish_ok = btc_ll_ok and eth_hl_ok
+
+int bullish_len_btc = math.max(2, btc_l1_ago - pivot_bar_ago + 1)
+int bullish_len_eth = math.max(2, eth_l1_ago - pivot_bar_ago + 1)
+float neck_btc_bull = ta.highest(btc_h, bullish_len_btc)
+float neck_eth_bull = ta.highest(eth_h, bullish_len_eth)
+
+bool neck_break_btc_bull = btc_c > neck_btc_bull
+bool neck_break_eth_bull = eth_c > neck_eth_bull
+bool neck_break_bull     = neck_break_btc_bull and neck_break_eth_bull
+
+int seg_len_bull = math.max(2, math.min(btc_l1_ago - pivot_bar_ago - 1, 60))
+float fail_eth_bull = math.max(eth_l2_price, ta.lowest(eth_l[1], seg_len_bull))
+
+var int   bars_since_break_bull = 99
+var float stored_fail_bull      = na
+var float stored_neck_bull      = na
+var float stored_l2_bull        = na
+if bullish_ok and neck_break_bull
+    bars_since_break_bull := 0
+    stored_fail_bull      := fail_eth_bull
+    stored_neck_bull      := neck_eth_bull
+    stored_l2_bull        := eth_l2_price
+else
+    bars_since_break_bull := math.min(99, bars_since_break_bull + 1)
+
+bool rejection_confirmed_bull = (bars_since_break_bull == REJECTION_WINDOW) and ta.lowest(eth_l[1], REJECTION_WINDOW) > stored_fail_bull
+bool entry_long_signal        = (bars_since_break_bull == REJECTION_WINDOW + 1) and (ta.lowest(eth_l[1], REJECTION_WINDOW) > stored_fail_bull)
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. 出場價（用於畫線與策略）
+// 止損 = failure × (1 ± buffer)，止盈 = Measured Move 或固定 RR
+// ═══════════════════════════════════════════════════════════════════
+float sl_buffer = SL_BUFFER_PCT / 100.0
+
+// 以下在實際 strategy 中會用 var 儲存持倉的 entry/sl/tp，這裡只算「若現在進場」的參考
+float stop_line_short = fail_eth_bear * (1.0 + sl_buffer)
+float stop_line_long  = fail_eth_bull * (1.0 - sl_buffer)
+float mm_bear         = neck_eth_bear - eth_h2_price
+float mm_bull         = eth_l2_price - neck_eth_bull
+
+// ═══════════════════════════════════════════════════════════════════
+// 8. 繪圖：背離標記、頸線、進場訊號
+// ═══════════════════════════════════════════════════════════════════
+plotshape(entry_short_signal, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="空訊號")
+plotshape(entry_long_signal,  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, title="多訊號")
+
+// 頸線參考（可選）
+plot(bearish_ok ? neck_eth_bear : na, color=color.orange, linewidth=1, title="Bear 頸線")
+plot(bullish_ok ? neck_eth_bull : na, color=color.blue,   linewidth=1, title="Bull 頸線")
+
+// 止損線參考（突破後才畫）
+plot(neck_break_eth_bear ? stop_line_short : na, color=color.red,   linewidth=1, title="SL Short")
+plot(neck_break_eth_bull ? stop_line_long  : na, color=color.green, linewidth=1, title="SL Long")
+
+alertcondition(entry_short_signal, title="背離空訊", message="BTC-ETH Bearish Divergence Short")
+alertcondition(entry_long_signal,  title="背離多訊", message="BTC-ETH Bullish Divergence Long")
